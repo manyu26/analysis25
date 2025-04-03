@@ -1,0 +1,207 @@
+
+---
+title: "Ego centric network for Academic motivation"
+author: ""
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r include=FALSE} 
+library(igraph)
+library(tidyverse)
+library(dplyr)
+library(egor)
+library(ggraph)
+library(intergraph)
+library(tidygraph)
+library(statnet)
+library(Hmisc)
+library(reticulate)
+library(knitr)
+library(rmarkdown)
+```
+
+## Load data
+
+```{r}
+alterattr_tmp <- read.csv("working_data/alterattr.csv")
+egoattributes_tmp <- read.csv("working_data/egoattr.csv")
+alter_tiestmp3 <- read.csv("working_data/altertie.csv")
+```
+
+### Egor object generation
+
+```{r}
+
+egor.obj<-egor::threefiles_to_egor(egos= egoattributes_tmp, 
+                                   alters.df = alterattr_tmp,
+                                   edges = alter_tiestmp3,
+                                   ID.vars=list(ego="egoID",
+                                                alter="alterID",
+                                                source="from.alter",
+                                                target="to.alter")
+                                   )
+
+summary(egor.obj)
+
+nego <- nrow(egor.obj$ego) # Number of egos
+nalter <- nrow(egor.obj$alter) # Number of egos
+naatie <- nrow(egor.obj$aatie)
+```
+
+As of 2025, a total of 1732 students signed up for the study and clicked the survey. Among them, 1486 consented and participated in the study. One participant was excluded due to putting in random letters. Participants who spent less than 5 minutes on the survey were also excluded (n = 433), resulting in 1052 participants. Next, participants who did not list a valid alter (i.e., naming self or non-person) were further excluded (n = 84). Finally, participants who did not provide any alter-alter ties were excluded (n = 81), resulting in 887 participants. The final sample size includes `r nego` egos (participants), `r nalter` alters (), and `r naatie` alter-alter ties (relationships).
+
+
+## Plot graphs for egos and find their network indices
+
+```{r}
+
+#https://r-graph-gallery.com/248-igraph-plotting-parameters.html
+
+gr.list <- egor::as_igraph(egor.obj) #without ego
+gr.list.ego <- egor::as_igraph(egor.obj, include.ego = TRUE) #with ego
+#egor::as.egor(gr.list)
+
+gr<-gr.list[["2059"]]
+plot(gr)
+
+igraph::degree(gr)
+igraph::betweenness(gr)
+igraph::edge_density(gr)
+igraph::centr_degree(gr)
+(igraph::eigen_centrality(gr)$vector)
+
+#egor_vis_app(egor.obj) #shiny app
+
+```
+
+```{r}
+cor.test(egoattributes_tmp$density, egoattributes_tmp$ego.belong)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$ext_reg)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$ext_iden)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$ext_intro)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$int_toknow)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$int_accomp)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$int_stim)
+```
+
+
+```{r}
+cor.test(egoattributes_tmp$density, egoattributes_tmp$ego.belong)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$ext_reg)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$ext_iden)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$ext_intro)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$int_toknow)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$int_accomp)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$int_stim)
+```
+```{r}
+cor.test(egoattributes_tmp$gendersim, egoattributes_tmp$ego.belong)
+cor.test(egoattributes_tmp$gendersim, egoattributes_tmp$ext_reg)
+cor.test(egoattributes_tmp$gendersim, egoattributes_tmp$ext_iden)
+cor.test(egoattributes_tmp$gendersim, egoattributes_tmp$ext_intro)
+cor.test(egoattributes_tmp$gendersim, egoattributes_tmp$int_toknow)
+cor.test(egoattributes_tmp$gendersim, egoattributes_tmp$int_accomp)
+cor.test(egoattributes_tmp$gendersim, egoattributes_tmp$int_stim)
+
+cor.test(egoattributes_tmp$agediver, egoattributes_tmp$ego.belong)
+cor.test(egoattributes_tmp$agediver, egoattributes_tmp$ext_reg)
+cor.test(egoattributes_tmp$agediver, egoattributes_tmp$ext_iden)
+cor.test(egoattributes_tmp$agediver, egoattributes_tmp$ext_intro)
+cor.test(egoattributes_tmp$agediver, egoattributes_tmp$int_toknow)
+cor.test(egoattributes_tmp$agediver, egoattributes_tmp$int_accomp)
+cor.test(egoattributes_tmp$agediver, egoattributes_tmp$int_stim)
+
+
+```
+
+
+### MLM
+
+```{r}
+library(lme4)
+egoattr_altattr <- left_join(alterattr_tmp, egoattributes_tmp, by="egoID")
+egoattr_altattr
+#alterID = egoattr_altattr$alterID
+
+egoattr_altattr <- egoattr_altattr |>  
+  mutate(alter.same.gen = (alter.gender==ego.gender))  
+egoattr_altattr <- egoattr_altattr |> 
+  mutate(alter.same.gen = as.character(alter.same.gen),
+         alter.same.gen = fct_recode(alter.same.gen,
+                                     Yes = "TRUE", No = "FALSE"))
+egoattr_altattr <- egoattr_altattr |> 
+  # Ego age centered around its mean and scaled by 5 (1 unit = 5 years)
+  mutate(ego.gen.cen = scale(ego.gender, scale= 5),
+         # Alter age category centered around its mean
+         alter.gen.cen = scale(as.numeric(alter.gender), scale= FALSE))
+
+write.csv(egoattr_altattr,"egoattr_altattr.csv")
+
+```
+
+```{r}
+egoattr_altattr$alter.same.gen=="TRUE"
+egoattr_altattr$ego.careerval<-scale(egoattr_altattr$ego.careerval)
+egoattr_altattr$ego.acadval<-scale(egoattr_altattr$ego.acadval)
+egoattr_altattr$int_stim<-scale(egoattr_altattr$int_stim)
+egoattr_altattr$ego.belong<-scale(egoattr_altattr$ego.belong, scale=T, center=F)
+
+model <- lme4::lmer(alter.same.gen ~ ego.belong+
+                     (1|egoID)
+                     , data =egoattr_altattr)
+
+model <- lme4::lmer(alter.same.gen ~ egoalter_tie*ego.belong+
+                     (1|egoID)
+                     , data =egoattr_altattr)
+summary(model)
+
+```
+
+
+<!---
+### Network indices
+describe(egoattributes_tmp2$dens)
+sd(egoattributes_tmp2$dens)
+describe(egoattributes_tmp2$mean.deg)
+sd(egoattributes_tmp2$mean.deg)
+describe(egoattributes_tmp2$mean.bet)
+sd(egoattributes_tmp2$mean.bet)
+describe(egoattributes_tmp$deg.centr)
+sd(egoattributes_tmp$deg.centr)
+
+
+cor.test(egoattributes_tmp$dens, egoattributes_tmp$ego.belong)
+cor.test(egoattributes_tmp$dens, egoattributes_tmp$ext_reg)
+cor.test(egoattributes_tmp$dens, egoattributes_tmp$ext_iden)
+cor.test(egoattributes_tmp$dens, egoattributes_tmp$ext_intro)
+cor.test(egoattributes_tmp$dens, egoattributes_tmp$int_toknow)
+cor.test(egoattributes_tmp$dens, egoattributes_tmp$int_accomp)
+cor.test(egoattributes_tmp$dens, egoattributes_tmp$int_stim)
+
+
+cor.test(egoattributes_tmp$mean.bet, egoattributes_tmp$ego.belong)
+cor.test(egoattributes_tmp$mean.bet, egoattributes_tmp$ext_reg)
+cor.test(egoattributes_tmp$mean.bet, egoattributes_tmp$ext_iden)
+cor.test(egoattributes_tmp$mean.bet, egoattributes_tmp$ext_intro)
+cor.test(egoattributes_tmp$mean.bet, egoattributes_tmp$int_toknow)
+cor.test(egoattributes_tmp$mean.bet, egoattributes_tmp$int_accomp)
+cor.test(egoattributes_tmp$mean.bet, egoattributes_tmp$int_stim)
+
+
+cor.test(egoattributes_tmp$mean.deg, egoattributes_tmp$ego.belong)
+cor.test(egoattributes_tmp$mean.deg, egoattributes_tmp$ext_reg)
+cor.test(egoattributes_tmp$mean.deg, egoattributes_tmp$ext_iden)
+cor.test(egoattributes_tmp$mean.deg, egoattributes_tmp$ext_intro)
+cor.test(egoattributes_tmp$mean.deg, egoattributes_tmp$int_toknow)
+cor.test(egoattributes_tmp$mean.deg, egoattributes_tmp$int_accomp)
+cor.test(egoattributes_tmp$mean.deg, egoattributes_tmp$int_stim)
+
+cor.test(egoattributes_tmp$deg.centr, egoattributes_tmp$ego.belong)
+cor.test(egoattributes_tmp$deg.centr, egoattributes_tmp$ext_reg)
+cor.test(egoattributes_tmp$deg.centr, egoattributes_tmp$ext_iden)
+cor.test(egoattributes_tmp$deg.centr, egoattributes_tmp$ext_intro)
+cor.test(egoattributes_tmp$deg.centr, egoattributes_tmp$int_toknow)
+cor.test(egoattributes_tmp$deg.centr, egoattributes_tmp$int_accomp)
+cor.test(egoattributes_tmp$deg.centr, egoattributes_tmp$int_stim)
+

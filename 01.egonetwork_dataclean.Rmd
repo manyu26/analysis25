@@ -1,0 +1,806 @@
+---
+title: "Ego centric network for Academic motivation"
+author: ""
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r include=FALSE} 
+library(igraph)
+library(tidyverse)
+library(dplyr)
+library(egor)
+library(ggraph)
+library(intergraph)
+library(tidygraph)
+library(statnet)
+library(Hmisc)
+library(reticulate)
+library(knitr)
+library(rmarkdown)
+```
+
+### Data cleaning
+```{r}
+egoattributes <- read.csv("SNAP-19-SN_March+13,+2025_09.45.csv")
+##Remove those with empty egoties
+egoattributes[770:775, 50:51] #detect where is the old/new data boundary
+alldat<- egoattributes %>%
+  filter(row_number() >= 773)
+alldat[1:5, 50:51] #confirm the cutoff is correct
+
+alldat<- subset(alldat, DistributionChannel!="preview") #remove non-data (preview only)
+nrow(alldat)
+
+##assign ID numbers
+alldat$egoID <- 1001:(1000+nrow(alldat))
+
+```
+
+## Initital Sample
+
+```{r}
+originaln<-nrow(alldat) # 1732 (total signed up for the study)
+## Cleaning by "Finished" rate
+alldat <- subset(alldat, Finished==1) 
+##Cleaning by participants' incomplete data not detected by "finished"
+alldat <- subset(alldat, egoID!=1047)
+alldat <- subset(alldat, egoID!=1184)
+##Cleaning by participants who did not answer any alters and thus considered incomplete
+alldat<- subset(alldat, nchar(Q1_1)!=0) 
+incompleten<-nrow(alldat) # 1486 (after cleaning all incomplete)
+
+alldat <- subset(alldat, egoID!="1553") #random answers
+randomn<-nrow(alldat) #1485
+
+## Cleaning by participants who answered less than 5 minutes
+##Other cleaning
+alldat<- subset(alldat, Duration..in.seconds.>=300) 
+shortn<-nrow(alldat) # 1052
+
+#Hmisc::describe(alldat$Q119)
+```
+
+
+### clean inappropriate alter names
+
+Check:
+```{r}
+#unique(alldat$Q19_7_TEXT)
+```
+
+
+```{r}
+
+#same ip, time, names
+#alldat <- filter(alldat, !(Q1_1 %in% c("yvonne meaux", "Yvonne meaux")))
+
+#alldat[alldat$egoID==1815, ]
+##1762??? i m her grandchild not 
+##2000???
+#1271 god
+alldat$Q19_7_TEXT[alldat$Q22_3_TEXT=="He's God"]<-"god"
+##1818/1819
+
+#columns 19-28 = alternames
+for (i in 19:28){
+  alldat[,i]<-tolower(alldat[,i])
+  alldat[,i][alldat[,i]=='na' & alldat$Q43 == 3] <- "incorrect"
+  alldat[,i][alldat[,i]=='n.a'|alldat[,i]=='n/a'|alldat[,i]=='na'|alldat[,i]=='-'|alldat[,i]=='--'|alldat[,i]==' '] <- "incorrect"
+  alldat[,i][alldat[,i]=='myself'] <- "incorrect"
+  alldat[,i][grepl('god',alldat[,i])] <- "incorrect"
+##Cleaning by participants who answered any incorrect alters
+  alldat<-subset(alldat, alldat[,i]!="incorrect")
+}
+```
+
+
+### clean inappropriate alter relationships (myself/God)
+
+```{r}
+#identify columns number
+alterrelat_var<-c(30,41,53,66, 80, 95,111,128,146,165)
+
+###code all inappropriate relation with 999 so that later when deleting ties, we can use 999 to identify and delete inappropriate ties (rather than deleting the data of the whole participant)
+
+for (i in alterrelat_var){
+  alldat[,i]<-tolower(alldat[,i])
+  alldat[,i-1][alldat[,i] %in% c('myself','myself ','self','me', 'he is god.','god', 'dog', 
+                                 "it's me ;)")] <- 999 #"bad person" seem legit and was not deleted. 
+  alldat[,i-1][grepl('self|god|myself|me', alldat[,i])]<-999
+  alldat[,i][alldat[,i] %in% c('myself','myself ','self','me', 'he is god.','god', 'dog', #recode relationship as NA
+                                 "it's me ;)")] <- "incorrect"
+##Cleaning by participants who answered any inappropriate alters
+  alldat<-subset(alldat, alldat[,i-1]!=999)
+  alldat<-subset(alldat, alldat[,i]!="incorrect")
+
+}
+namen<-nrow(alldat) #after cleaning god/myself 968
+
+###alldat[,i][startsWith(alldat[,i], "it")]<-''
+
+```
+
+### Code alter relationships
+
+1 = Parent
+2 = Child (recode to combine with 1)
+3 = Sibling
+4 = Relative
+5 = Spouse/romantic partner/sig other
+6 = Friend/peer
+7 = Other (unidentified)
+8 = teacher figures
+9 = mental health professions (counselor, therapist, psychiatrist)
+10 = other adults (caretaker role, nanny, parent figure)
+11 = work
+12 = church/religious
+
+```{r}
+
+for (i in alterrelat_var){
+  alldat[,i]<-tolower(alldat[,i])
+
+  alldat[,i-1][alldat[,i-1]==2]<-1 #all parent-child categories, including step
+
+  alldat[,i-1][grepl('pastor|church|minister',alldat[,i])] <- 12  #church
+  alldat[,i][grepl('pastor|church|minister',alldat[,i])] <- "church"  #church
+
+  alldat[,i-1][grepl("friends dad|family friend|boyfriends mom|mothers friend|bestfriends mom|friend's mom|doctor|chiropractor|owner of my house|patient|neighbor|sponsor|book|parentfig|my nanny|nfl player", alldat[,i])] <- 10
+  alldat[,i][grepl("friends dad|family friend|boyfriends mom|mothers friend|bestfriends mom|friend's mom|doctor|chiropractor|owner of my house|patient|neighbor|sponsor|book|parentfig|my nanny|nfl player", alldat[,i])]  <- "othr_adults"
+
+  alldat[,i-1][grepl('grand|gm|grandparent|grandchild', alldat[,i])] <-4
+  alldat[,i][grepl('grand|gm|grandparent|grandchild', alldat[,i])] <-"grandparent"
+
+  alldat[,i-1][alldat[,i] %in% c('cousin','uncle','uncle ','bnl'
+                                 ,'aunt','brothers wife','brother in law','mother n law',
+                                 'significant others parent','family','sister in law','brother-in-law',
+                                 'sister  in law','sister-in-law')] <- 4 #relatives
+  alldat[,i][alldat[,i] %in% c('cousin','uncle', 'uncle ', 'bnl'
+                                 ,'aunt','brothers wife','brother in law','mother n law',
+                                 'significant others parent','family','sister in law','brother-in-law',
+                               'sister  in law','sister-in-law')] <- "relatives" #relatives
+  
+  alldat[,i-1][grepl('step|parent|mom|dad|mother|father|pa pa|moms bf|dads gf|legal guardian|pa pa', alldat[,i])] <- 1
+  alldat[,i][grepl('step|parent|mom|dad|mother|father|pa pa|moms bf|dads gf|legal guardian|pa pa', alldat[,i])] <- "parentfig"
+
+  alldat[,i-1][grepl('boss|work|employ',alldat[,i])] <- 11  #work exboss
+  alldat[,i][grepl('boss|work|employ',alldat[,i])] <- "work"  #work
+  
+  alldat[,i-1][grepl('ex|former partner',alldat[,i])] <- 5 ##past/current sign other
+  alldat[,i][grepl('ex|former partner',alldat[,i])] <- "sigother" #past/current sign other
+
+  alldat[,i-1][grepl('classmate|organization leader|acquintance|friend|room|peer',alldat[,i])] <- 6 ##peer
+  alldat[,i][grepl('classmate|organization leader|acquintance|friend|room|peer',alldat[,i])] <- "peer" #peer
+  
+  alldat[,i-1][grepl('couns|admin|mentor|student|band|college|teach|advis|tutor|councelor|chemistry aid|
+                      academic|princ|school|train|coach|faculty|instructor|profess|guidance|educator',alldat[,i])] <- 8 #teacherfigures
+  alldat[,i][grepl('couns|admin|mentor|student|band|college|teach|advis|tutor|councelor|chemistry aid|
+                    academic|princ|school|train|coach|faculty|instructor|profess|guidance|educator',alldat[,i])] <- "academic" #MHfigures
+  alldat[,i-1][grepl('therapist|psychiat',alldat[,i])] <- 9
+  alldat[,i][grepl('therapist|psychiat',alldat[,i])] <- "mentalhealth"
+  
+  alldat[,i-1][alldat[,i] %in% c('dont know him','nothing','na','bad person ')] <- 7 #unidentified
+  alldat[,i][alldat[,i] %in% c('dont know him','nothing','na','bad person ')] <- NA #unidentified
+
+  #alldat[,i][alldat[,i]==""]<-NA
+}
+
+```
+Check again
+```{r}
+# Combine all the data into one vector
+combined_data <- c(alldat$Q2_7_TEXT, alldat$Q11_7_TEXT, alldat$Q19_7_TEXT, alldat$Q27_7_TEXT,
+                   alldat$Q35_7_TEXT, alldat$Q43_7_TEXT, alldat$Q51_7_TEXT, alldat$Q59_7_TEXT,
+                   alldat$Q67_7_TEXT, alldat$Q75_7_TEXT)
+
+# Find unique values
+unique_values <- unique(combined_data)
+
+# Calculate the frequency of each unique value
+frequency_table <- table(combined_data)
+
+# Print the frequency table
+print(frequency_table)
+
+```
+
+### Ego Attribute Dataset
+
+```{r}
+
+egoattributes <-  dplyr::select(alldat, egoID, Q94_1:Q120, -Q2_3_TEXT, -Q3_9_TEXT, - Q3_7_TEXT)
+# Convert character columns with numeric values to numeric
+egoattributes <- egoattributes %>%
+  mutate_if(is.character, as.numeric)
+str(egoattributes)
+```
+
+#### Recoding and finding reliability for ext_/external regulation 
+
+```{r}
+
+ext_reg <- select(egoattributes, Q94_1, Q96_2, Q98_3, Q100_4)
+egoattributes$ext_reg<-rowMeans(ext_reg)
+psych::alpha(ext_reg)$total$raw_alpha 
+#describe(egoattributes$ext_reg)
+
+```
+
+#### Recoding and finding reliability for Intrinsic/to know
+```{r}
+int_toknow <- select(egoattributes, Q94_2, Q96_3, Q98_4, Q100_5)
+egoattributes$int_toknow<-rowMeans(int_toknow)
+#psych::alpha(int_toknow)
+#describe(egoattributes$int_toknow)
+```
+***
+#### Recoding and finding reliability for ext_/identified
+```{r}
+ext_iden <- select(egoattributes, Q94_3, Q96_4, Q98_5, Q100_6)
+egoattributes$ext_iden<-rowMeans(ext_iden)
+#psych::alpha(ext_iden)
+#describe(egoattributes$ext_iden)
+```
+***
+
+#### Recoding and finding reliability for Intrinsic/stimulation
+```{r}
+int_stim <- select(egoattributes, Q94_4, Q96_5, Q98_6, Q102_1)
+egoattributes$int_stim<-rowMeans(int_stim)
+#psych::alpha(int_stim)
+#describe(egoattributes$int_stim)
+```
+
+***
+#### Recoding and finding reliability for Amotivation
+```{r}
+amotiv <- select(egoattributes, Q94_5, Q96_6, Q100_1, Q102_2)
+egoattributes$amotiv<-rowMeans(amotiv)
+#psych::alpha(amotiv)
+#describe(egoattributes$amotiv)
+```
+
+***
+#### Recoding and finding reliability for Intrinsic/Accomplishment
+```{r}
+int_accomp <- select(egoattributes, Q94_6, Q98_1, Q100_2, Q102_3)
+egoattributes$int_accomp<-rowMeans(int_accomp)
+#psych::alpha(int_accomp)
+#describe(egoattributes$int_accomp)
+```
+
+***
+#### Recoding and finding reliability for ext_/introjected
+```{r}
+ext_intro <- select(egoattributes, Q96_1, Q98_2, Q100_3, Q102_4)
+egoattributes$ext_intro<-rowMeans(ext_intro)
+#psych::alpha(ext_intro)
+#describe(egoattributes$ext_intro)
+```
+
+```{r}
+
+egoattributes <- rename(egoattributes, ego.gender=Q2.1, ego.race=Q3, ego.workhours=Q4
+                        , ego.studentorg=Q6.1, ego.belong=Q107
+                        , ego.acadval=Q91_1, ego.careerval=Q92_1
+                        , ego.age=Q119, ego.year=Q120
+                        )
+
+##Recode attritbues where necessary
+
+egoattributes$ego.genderbi[egoattributes$ego.gender==1]<-0 #"female"
+egoattributes$ego.genderbi[egoattributes$ego.gender==2]<-1 #"male"
+egoattributes$ego.genderbi[egoattributes$ego.gender==3]<-NA #"non-binary"
+egoattributes$ego.racetri[egoattributes$ego.race==1]<-1 #White
+egoattributes$ego.racetri[egoattributes$ego.race==2]<-2 #Black
+egoattributes$ego.racetri[egoattributes$ego.race>=3]<-3 #Other
+
+```
+
+
+
+## Alter Attributes with ego-alter ties
+
+```{r}
+##alter data by sequence
+alter01<-dplyr::select(alldat, egoID, Q1_1, Q2:Q10_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+alter02<-dplyr::select(alldat, egoID, Q1_2, Q11:Q18_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+alter03<-dplyr::select(alldat, egoID, Q1_3, Q19:Q26_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+alter04<-dplyr::select(alldat, egoID, Q1_4, Q27:Q34_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+alter05<-dplyr::select(alldat, egoID, Q1_5, Q35:Q42_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+alter06<-dplyr::select(alldat, egoID, Q1_6, Q43:Q50_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+alter07<-dplyr::select(alldat, egoID, Q1_7, Q51:Q58_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+alter08<-dplyr::select(alldat, egoID, Q1_8, Q59:Q66_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+alter09<-dplyr::select(alldat, egoID, Q1_9, Q67:Q74_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+
+alter10<-dplyr::select(alldat, egoID, Q1_10, Q75:Q82_10_TEXT,
+                           person21_1,  
+                           Q110_4,  Q110_5,  
+                           Q111_4,  Q111_5,  Q111_6, 
+                           Q112_4,  Q112_5,  Q112_6,  Q112_7,  
+                           Q113_4,  Q113_5,  Q113_6,  Q113_7,  Q113_8, 
+                           Q114_4,  Q114_5,  Q114_6,  Q114_7,  Q114_8,  Q114_9,  
+                           Q115_4,  Q115_5,  Q115_6,  Q115_7,  Q115_8,  Q115_9,  Q115_10,  
+                           Q116_4,  Q116_5,  Q116_6,  Q116_7,  Q116_8,  Q116_9,  Q116_10,  Q116_11,  
+                           Q117_4,  Q117_5,  Q117_6,  Q117_7,  Q117_8,  Q117_9,  Q117_10,  Q117_11,  Q117_12)
+
+ChangeNames <- function(x) {
+    names(x) <- c("egoID", "alter.initial", "egoalt_relation", "egoalt_relate_othr"
+                     , "egoalter_tie", "egoalter_commfreq", "alter.gender"
+                     , "alt.gender_othr"
+                     , "alter.age", "alter.acad.val", "alter.career.val","alter.edu"
+                     , "alter.edu.othr"
+                  , "e0102"
+                  , "e0103", "e0203"
+                  , "e0104", "e0204", "e0304"
+                  , "e0105", "e0205", "e0305", "e0405"
+                  , "e0106", "e0206", "e0306", "e0406", "e0506"
+                  , "e0107", "e0207", "e0307", "e0407", "e0507", "e0607"
+                  , "e0108", "e0208", "e0308", "e0408", "e0508", "e0608", "e0708"
+                  , "e0109", "e0209", "e0309", "e0409", "e0509", "e0609", "e0709", "e0809"
+                  , "e0110", "e0210", "e0310", "e0410", "e0510", "e0610", "e0710", "e0810", "e0910")
+    return(x)
+}
+
+ego.alt <- function(x, alterseq) {
+  x<-ChangeNames(x)
+  x$alterID <- alterseq
+  x$alterID<-paste(x$egoID, x$alterID, sep="")
+  #x<-subset(x, alter.initial!="")
+  return(x)
+}
+
+alter01 <- ego.alt(alter01, "01") 
+alter02 <- ego.alt(alter02, "02") 
+alter03 <- ego.alt(alter03, "03") 
+alter04 <- ego.alt(alter04, "04") 
+alter05 <- ego.alt(alter05, "05") 
+alter06 <- ego.alt(alter06, "06") 
+alter07 <- ego.alt(alter07, "07") 
+alter08 <- ego.alt(alter08, "08") 
+alter09 <- ego.alt(alter09, "09") 
+alter10 <- ego.alt(alter10, "10") 
+
+alterlist <- mget(ls(pattern= "^alter.\\d$"))
+alterattr <- alterlist %>% 
+  reduce(full_join)
+
+
+```
+
+## alter characteristics at alter level 
+
+```{r}
+#alter_cleaned<-subset(alterattr, nchar(alter.initial)!=0)
+alterattr$egoalter_tie<-as.numeric(alterattr$egoalter_tie)
+alterattr$alter.age<-as.numeric(alterattr$alter.age)
+alterattr$egoalter_commfreq<-as.numeric(alterattr$egoalter_commfreq)
+alterattr$alter.career.val<-as.numeric(alterattr$alter.career.val)
+alterattr$alter.edu<-as.numeric(alterattr$alter.edu)
+alterattr$alter.acad.val<-as.numeric(alterattr$alter.acad.val)
+
+
+Hmisc::describe(alterattr$alter.gender)
+
+alterattr$alter.genderbi[alterattr$alter.gender==1]<-0 #female
+alterattr$alter.genderbi[alterattr$alter.gender==2]<-1 #male
+alterattr$alter.genderbi[alterattr$alter.gender==3]<-NA #non-binary
+
+#summary(as.factor(alterattr$alter.edu))
+
+```
+
+## alter characteristics at ego level (summarise)
+```{r}
+
+ego_avgaltattr <- 
+  alterattr %>%
+  group_by(egoID) %>%
+  summarise(mean.clo=mean(egoalter_tie, na.rm=T),
+            mean.comm=mean(egoalter_commfreq, na.rm=TRUE),
+            mean.careerval=mean(alter.career.val, na.rm=T), mean.acadval= mean(alter.acad.val, na.rm=TRUE),
+            mean.edu = mean(alter.edu, na.rm=T), alt.edudiverse = n_distinct(alter.edu, na.rm=T),
+            alt.type=n_distinct(egoalt_relation, na.rm=TRUE), alt.age=mean(alter.age, na.rm=T), alt.agesd=sd(alter.age,na.rm=T),
+            alt.female= sum(alter.gender==2), alt.male= sum(alter.gender==1),
+            alt.genratio = alt.female/alt.male)
+
+egoattributes<-merge(egoattributes, ego_avgaltattr, by="egoID")
+
+#update files
+#write.csv(alterattr, "alter_attribute.csv")
+#write.csv(egoattributes, "ego_attribute.csv")
+
+```
+
+
+
+## alter-alter relationships data
+
+```{r}
+
+ChangeNames2 <- function(x) {
+    names(x) <- c("egoID", "from.alter", "alt.alt.tie","egoalt_relation", "egoalt_relate_othr", "alter.initial", "to.alter")
+    return(x)
+}
+
+
+egoalter <-  dplyr::select(alterattr, egoID, alterID, alter.initial, egoalt_relation, egoalt_relate_othr
+                          # Q1_1,  Q1_2,  Q1_3,  Q1_4,  Q1_5,  Q1_6,  Q1_7,  Q1_8,
+                          # Q1_9,  Q1_10  #initials
+                  , e0102
+                  , e0103, e0203
+                  , e0104, e0204, e0304
+                  , e0105, e0205, e0305, e0405
+                  , e0106, e0206, e0306, e0406, e0506
+                  , e0107, e0207, e0307, e0407, e0507, e0607
+                  , e0108, e0208, e0308, e0408, e0508, e0608, e0708
+                  , e0109, e0209, e0309, e0409, e0509, e0609, e0709, e0809
+                  , e0110, e0210, e0310, e0410, e0510, e0610, e0710, e0810, e0910)
+
+
+
+y<-data.frame()
+for (i in 1:10){
+  for (j in (i+1):10){
+    if (i<9 && j < 10){
+      a=(paste("0",i,sep=""))
+      b=(paste("0",j,sep=""))
+      tmp<-subset(egoalter, endsWith(alterID, paste0("0",i)))
+      tmp<-dplyr::select(tmp, egoID, alterID, ends_with(paste0(a,b)),egoalt_relation,egoalt_relate_othr,alter.initial)
+      tmp$to.alter <- paste0(tmp$egoID, b) 
+      tmp <- ChangeNames2(tmp)
+      y<-rbind(y, tmp)
+    }
+    if (i<9 && j == 10){
+      a=(paste("0",i,sep=""))
+      b=(paste(j,sep=""))
+      tmp<-subset(egoalter, endsWith(alterID, paste0("0",i)))
+      tmp<-dplyr::select(tmp, egoID, alterID, ends_with(paste0(a,b)),egoalt_relation,egoalt_relate_othr,alter.initial)
+      tmp$to.alter <- paste0(tmp$egoID, b) 
+      tmp <- ChangeNames2(tmp)
+      y<-rbind(y, tmp)
+    }    
+    if (i==9 ){
+      a=(paste("0",i,sep=""))
+      b=(paste(j,sep=""))
+      tmp<-subset(egoalter, endsWith(alterID, paste0("0",i)))
+      tmp<-dplyr::select(tmp, egoID, alterID, ends_with(paste0(a,b)),egoalt_relation,egoalt_relate_othr,alter.initial )
+      tmp$to.alter <- paste0(tmp$egoID, b) 
+      tmp <- ChangeNames2(tmp)
+      y<-rbind(y, tmp)
+    }
+  }}
+
+alter_ties = y
+#write.csv(y, "alter_ties.csv")
+
+```
+
+## Clean alter ties that have no relationships 
+
+Some alters do not know each other (relationship = 0) or have negative relationship (relationship weight<0). The origin weight variable is recoded so that 
+- negative values of weight_origin = no relationship
+- positive values = weight of 1
+
+```{r}
+
+#check responses
+#unique(alter_tiestmp$egoalt_relate_othr)
+#table(alter_tiestmp$egoalt_relate_othr)
+
+#unique(alter_tiestmp$egoalt_relation)
+
+#https://bookdown.org/rdpeng/rprogdatascience/regular-expressions.html
+
+#regrex in r 
+alter_tiestmp2 <- subset(alter_ties, nchar(alter.initial)!=0)
+
+#alterattrtmp <- alterattr[((alterattr$alterID %in% alter_ties$from.alter)|(alterattr$alterID %in% alter_ties$to.alter)), ]  
+
+alter_tiestmp2$alt.alt.tie<-as.numeric(alter_tiestmp2$alt.alt.tie)
+#alter_tiestmp3<-subset(alter_tiestmp2, alt.alt.tie!="")
+
+
+alter_tiestmp3<- dplyr::select(alter_tiestmp2, egoID, from.alter, to.alter, alt.alt.tie)
+alter_tiestmp3<- rename(alter_tiestmp3, weight_origin=alt.alt.tie)
+#alter_tiestmp3$weight<-alter_tiestmp3$weight_origin+10
+alter_tiestmp3$weight<-alter_tiestmp3$weight_origin
+
+
+alter_tiestmp3$weight[alter_tiestmp3$weight_origin<=0]<-NA #negative or no relationship
+#alter_tiestmp3<-subset(alter_tiestmp3, is.na(alter_tiestmp3$weight)!=T)
+#alter_tiestmp3$weight<-alter_tiestmp3$weight
+describe(alter_tiestmp3$weight)
+table(alter_tiestmp3$weight)
+#write.csv(alter_tiestmp2,"alter_tiestmp2_allegos.csv")
+#write.csv(alter_tiestmp3,"alter_tiestmp3.csv") #only with at least one alt-alt tie.
+```
+
+### egoIDs who completed the survey but did not report any alter-alter ties.
+```{r}
+# Get unique egoIDs from both datasets
+egoIDs_in_tiestmp2 <- unique(alter_tiestmp2$egoID)
+egoIDs_in_tiestmp3 <- unique(alter_tiestmp3$egoID)
+
+# Identify egoIDs present in alter_tiestmp2 but not in alter_tiestmp3
+missing_egoIDs <- setdiff(egoIDs_in_tiestmp2, egoIDs_in_tiestmp3)
+
+# Print the missing egoIDs
+print(missing_egoIDs)
+finaln<-length(missing_egoIDs)
+```
+
+## Clean missing in all three sets
+
+### screen excluded egos and alters
+#and report final sample size after cleaning
+
+```{r}
+
+
+listtemp1<-unique(alter_tiestmp3$egoID) #number of screened participants
+alters_screened<-c(alter_tiestmp3$from.alter, alter_tiestmp3$to.alter)
+listtemp2<-unique(alters_screened) #number of alters
+#number of alter-alter tie = alter_tiestmp3
+#egoattributes<-read.csv("ego_attribute.csv")
+egoattributes_tmp <- subset(egoattributes, (egoID %in% listtemp1))
+#alterattr<-read.csv("alter_attribute.csv")
+#alterattr$egoalter_tie_deci<-alterattr$egoalter_tie
+#alterattr$egoalter_tie_deci[alterattr$egoalter_tie_deci<=0]<- NA
+alterattr_tmp<-alterattr[complete.cases(alterattr),]
+alterattr_tmp<-subset(alterattr_tmp, egoID %in% listtemp1)
+alterattr_tmp<-subset(alterattr, alterID %in% listtemp2)
+#alterattr_tmp$egoalter_tie_deci<-(alterattr_tmp$egoalter_tie_deci)/10
+#$alter_tiestmp3<-subset(alter_tiestmp3, alterID %in% listtemp3)
+
+describe(alterattr_tmp$egoalter_tie)
+summary(as.factor(alterattr_tmp$egoalter_tie))
+
+```
+
+### descriptive statistics
+
+```{r}
+describe(egoattributes_tmp$ego.gender)
+describe(egoattributes_tmp$ego.race)
+egoattributes_tmp$ego.ager<-egoattributes_tmp$ego.age + 14
+describe(egoattributes_tmp$ego.ager)
+sd(egoattributes_tmp$ego.ager, na.rm=T)
+describe(egoattributes_tmp$ego.year)
+```
+
+
+### Egor object generation
+
+```{r}
+
+egor.obj<-egor::threefiles_to_egor(egos= egoattributes_tmp, 
+                                   alters.df = alterattr_tmp,
+                                   edges = alter_tiestmp3,
+                                   ID.vars=list(ego="egoID",
+                                                alter="alterID",
+                                                source="from.alter",
+                                                target="to.alter")
+                                   )
+
+summary(egor.obj)
+
+```
+
+## Plot graphs for egos and find their network indices
+
+```{r}
+
+#https://r-graph-gallery.com/248-igraph-plotting-parameters.html
+
+gr.list <- egor::as_igraph(egor.obj) #without ego
+gr.list.ego <- egor::as_igraph(egor.obj, include.ego = TRUE) #with ego
+#egor::as.egor(gr.list)
+
+#gr<-gr.list[["2059"]]
+#plot(gr)
+#igraph::degree(gr)
+#igraph::betweenness(gr) 
+#igraph::edge_density(gr)
+#igraph::centr_degree(gr)
+#(igraph::eigen_centrality(gr)$vector)
+
+#egor_vis_app(egor.obj) #shiny app
+
+```
+
+## Network indices (Descriptive analysis)
+
+```{r}
+
+centralitydf<- gr.list %>% 
+  map_dfr(~tibble(
+    mean.eigen=mean(igraph::eigen_centrality(.x)$vector),
+    dens=edge_density(.x),
+    mean.deg=mean(igraph::degree(.x)),
+    mean.bet=mean(igraph::betweenness(.x)),
+    deg.centr=centr_degree(.x)$centralization),
+    .id="egoID")
+
+egoattributes_tmp2<-merge(egoattributes_tmp, centralitydf, by ="egoID")
+egoattributes_tmp<-merge(egoattributes_tmp, centralitydf, by ="egoID")
+```
+
+
+
+### Analyses using igraph
+
+```{r}
+
+alter.aca.value<- alterattr_tmp %>%
+  group_by(egoID) %>%
+  summarise_at(vars(alter.acad.val), list(alter.aca.value.avg=mean))
+
+egoattributes_tmp<-merge(egoattributes_tmp, alter.aca.value, by ="egoID")
+alter.career.value<- alterattr_tmp %>%
+  group_by(egoID) %>%
+  summarise_at(vars(alter.career.val), list(alter.career.value.avg=mean))
+
+egoattributes_tmp<-merge(egoattributes_tmp, alter.career.value, by ="egoID")
+
+cor.test(egoattributes_tmp$alter.aca.value.avg, egoattributes_tmp$ego.acadval)
+cor.test(egoattributes_tmp$alter.career.value.avg, egoattributes_tmp$ego.careerval)
+
+```
+
+
+### Ego attributes correlation with network indices 
+
+```{r}
+
+egodense<-ego_density(egor.obj)
+egodense<-rename(egodense, egoID=.egoID)
+egoattributes_tmp <- merge(egoattributes_tmp, egodense, by="egoID")
+describe(egoattributes_tmp$density)
+sd(egoattributes_tmp$density)
+```
+
+### ego-alter homophily
+
+```{r}
+
+gendersim<-comp_ei(egor.obj, "alter.gender", "ego.gender")
+gendersim<-rename(gendersim, egoID=.egoID, gendersim=ei)
+egoattributes_tmp<-merge(egoattributes_tmp, gendersim, by ="egoID")
+
+describe(egoattributes_tmp$gendersim)
+sd(egoattributes_tmp$gendersim, na.rm=T)
+
+```
+
+
+
+#gender and age diversity
+```{r}
+
+composition(egor.obj,"alter.gender") #alter attribute only
+
+alts_diversity_count(egor.obj, "alter.gender")
+agediver <- alts_diversity_entropy(egor.obj, "alter.age")
+agediver <- rename(agediver, egoID=.egoID, agediver=entropy)
+egoattributes_tmp<-merge(egoattributes_tmp, agediver, by="egoID")
+
+```
+
+### h v. low belonging
+
+```{r}
+egoattributes_tmp$belong_cat<-NA
+egoattributes_tmp$belong_cat[egoattributes_tmp$ego.belong>3]<-1
+egoattributes_tmp$belong_cat[egoattributes_tmp$ego.belong<=3]<-0
+egoattributes_tmp$belong_cat<- as.numeric(egoattributes_tmp$belong_cat)
+describe(as.factor(egoattributes_tmp$belong_cat))
+describe(egoattributes_tmp$mean.bet)
+
+
+cor.test(egoattributes_tmp$mean.bet, egoattributes_tmp$belong_cat) #sig
+t.test(egoattributes_tmp$mean.bet~egoattributes_tmp$belong_cat, var.equal=FALSE)
+cor.test(egoattributes_tmp$density, egoattributes_tmp$belong_cat)
+cor.test(egoattributes_tmp$dens, egoattributes_tmp$belong_cat)
+cor.test(egoattributes_tmp$mean.deg, egoattributes_tmp$belong_cat)
+cor.test(egoattributes_tmp$deg.centr, egoattributes_tmp$belong_cat)
+
+
+highbelong<-subset(egoattributes_tmp, belong_cat=="high")
+lowbelong<-subset(egoattributes_tmp, belong_cat=="low")
+
+```
+
+### Saving the final egoattribute data with network indices and all variables manipulations
+
+```{r}
+#write.csv(alterattr_tmp,"working_data/alterattr.csv")
+#write.csv(egoattributes_tmp,"working_data/egoattr.csv")
+#write.csv(alter_tiestmp3,"working_data/altertie.csv")
+```
+
+
+As of 2025, a total of `r originaln` students signed up for the study and clicked the survey. Among them, `r incompleten` consented and participated in the study. One participant was excluded due to putting in random letters. Participants who spent less than 5 minutes on the survey were also excluded (n = `r randomn-shortn`), resulting in `r shortn` participants. Next, participants who did not list a valid alter (i.e., naming self or non-person) were further excluded (n = `r shortn-namen`). Finally, participants who did not provide any alter-alter ties were excluded (n = `r finaln`), resulting in `r namen-finaln` participants.
